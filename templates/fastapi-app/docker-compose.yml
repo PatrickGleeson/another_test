@@ -1,0 +1,94 @@
+version: '3.7'
+
+# This docker-compose file is used for local development and testing
+# It defines three services:
+  # postgres: DB server to be used for local development and testing, on separate DBs.
+  # <REPO_NAME>: Local development server for spinning up the app locally and using it.
+  # <REPO_NAME>-test-runner: Transitory local testing, built with the additional testing requirements.
+# It defines one volume:
+  # postgres: For preserving DB data between working sessions.
+# It uses docker compose extension fields (in other words, YAML anchors) to define
+# the environment variables to avoid duplication and easily be consistent.
+
+# Extension field/YAML anchor for default environment variables
+x-environment: &default-environment
+  POSTGRES_DB: <REPO_NAME>
+  POSTGRES_USER: pguser
+  POSTGRES_PASSWORD: pgpass
+  POSTGRES_HOST: postgres
+  SECRET_KEY: s3cr3t
+  CHAMBER_ENABLED: "false"
+
+services:
+  # PostgreSQL for local development & testing
+  postgres:
+    # Start from the docker registry image "postgres", at tag "12"
+    image: postgres:12
+    environment:
+      <<: *default-environment
+    # Expose on port 5452 of the host machine
+    ports:
+      - "5452:5432"
+    # Reuse the same data volume to preserve data within the DB between restarts
+    volumes:
+      - "postgres:/var/lib/postgresql/data"
+
+  # <REPO_NAME> local development
+  <REPO_NAME>:
+    build:
+      # Build from the `Dockerfile` in this folder
+      context: .
+      args:
+        # Set the non-test requirements to be installed when building the docker image
+        REQUIREMENTS: "requirements/requirements.txt"
+    environment:
+      <<: *default-environment
+    # Mount this folder as `code` so updates in the local files change the container
+    volumes:
+      - "./:/code/"
+    # Override the command from the Dockerfile
+      # Wait for the postgres server to be ready
+      # Run alembic migrations
+      # Don't use datadog locally
+      # Auto reload uvicorn when python code is changed
+    command: >
+      sh -c "
+        python wait_for_postgres.py &&
+        alembic upgrade head &&
+        uvicorn app.main:app --port 80 --host 0.0.0.0 --reload --reload-dir=app
+      "
+    # Require the postgres instance
+    depends_on:
+      - postgres
+    # Expose on port 8080 of the host machine
+    ports:
+      - "8080:80"
+    # Always restart to keep it running
+    restart: always
+
+  # <REPO_NAME> test runner
+  <REPO_NAME>-test-runner:
+    build:
+      # Build from the `Dockerfile` in this folder
+      context: .
+      args:
+        # Set the test requirements to be installed when building the docker image
+        REQUIREMENTS: "requirements/requirements-test.txt"
+    environment:
+      <<: *default-environment
+    # Mount this folder as `code` so updates in the local files change the container
+    volumes:
+      - "./:/code/"
+    # Override the command from the Dockerfile
+      # Wait for the postgres server to be ready
+      # Run pytest, not the server
+    command: >
+      sh -c "
+        python wait_for_postgres.py &&
+        pytest
+    # Require the postgres instance
+    depends_on:
+      - postgres
+
+volumes:
+  postgres:

@@ -1,0 +1,275 @@
+#
+# This helmfile describes how to deploy our application.
+#
+
+# repositories: a way to describe where to look for helm charts
+repositories:
+  # Cloud Posse incubator repo of helm charts
+  - name: "cloudposse-incubator"
+    url: "https://charts.cloudposse.com/incubator/"
+
+# environments: settings that interact with the `--environment` command line option
+# if --environment is passed to helmfile, only releases that specify that environment here
+# will be deployed
+environments:
+  # The "default" environment is available and used when `helmfile` is run without `--environment NAME`.
+  default:
+  # Then we have named environments this app should be deployed to
+  prod:
+    values:
+      # 35.168.53.92        Legacy VPC NAT gateway
+      # 54.85.100.105       Legacy VPC NAT gateway
+      - whitelist: "35.168.53.92/32,54.85.100.105/32"
+  staging:
+    values:
+      # 35.168.53.92        Legacy VPC NAT gateway
+      # 54.85.100.105       Legacy VPC NAT gateway
+      # 38.142.189.163      Chicago Office WAN/VPN IP
+      - whitelist: "35.168.53.92/32,54.85.100.105/32,38.142.189.163/32"
+  unlimited:
+
+# the helm releases that this helmfile manages
+releases:
+  #
+  # References:
+  #   - https://github.com/cloudposse/charts/blob/master/incubator/monochart
+  #
+
+    # name must be unique on the cluster
+  - name: '{{ env "RELEASE_NAME" | default "<REPO_NAME>-dev-00" }}'
+    # the chart this release uses
+    chart: "cloudposse-incubator/monochart"
+    version: "0.23.1"
+    # wait until the deployment is healthy
+    wait: true
+    atomic: false
+    cleanupOnFail: true
+    # the section where we pass in what the target helm chart expects in it's values.yaml
+    # explanation in this section will be specific to monochart
+    #
+    # Reference: https://github.com/cloudposse/charts/blob/master/incubator/monochart/values.yaml
+    #
+    values:
+        # allows things to use this name if they desire, rather than a generated full name
+      - fullnameOverride: "<REPO_NAME>"
+        # what image to use across all pod specs
+        image:
+          repository: '{{ env "IMAGE_NAME" | default "656168747096.dkr.ecr.us-east-1.amazonaws.com/<REPO_NAME>-dev" }}'
+          tag: '{{ env "IMAGE_TAG" | default "latest" }}'
+          pullPolicy: '{{ env "<BASHED_REPO_NAME>_IMAGE_PULL_POLICY" | default "Always" }}'
+
+        # number of replicas for your replicaSet
+        replicaCount: '{{ env "<BASHED_REPO_NAME>_REPLICA_COUNT" | default "1" }}'
+
+        # Direct Datadog to use the agent on the kubernetes host
+        envFromFieldRefFieldPath:
+          DD_AGENT_HOST: status.hostIP
+
+        # Deployment Kubernetes Resource configuration
+        deployment:
+          enabled: true
+          # Deployment Strategy to use
+          strategy:
+            # RollingUpdate means new pods are spun up and ensured healthy before old removed
+            type: RollingUpdate
+            rollingUpdate:
+              # maxUnavailable makes sure we do not dip below the replica count by this number
+              # of pods failing the healthcheck
+              maxUnavailable: 0
+              # maxSurge lets us go over our defined replica count by this many pods
+              maxSurge: 1
+          pod:
+            # annotations to be added to pods in this deployment
+            annotations:
+              # allows `kiam` to "assign" the pod an IAM role by name
+              "iam.amazonaws.com/role":  "<REPO_NAME>-role"
+              # allows the pod to be evicted even though it has local storage (part of monochart)
+              "cluster-autoscaler.kubernetes.io/safe-to-evict": 'true'
+
+            # This hurts Alex.  It hurts Alex a lot.
+            {{- if eq .Environment.Name "staging" }}
+            hostAliases:
+              - ip: "54.167.82.236"
+                hostnames:
+                  - "db0"
+              - ip: "3.95.204.217"
+                hostnames:
+                  - "arbiter0"
+              - ip: "54.90.244.67"
+                hostnames:
+                  - "analytics0"
+            {{- end }}
+            {{- if eq .Environment.Name "prod" }}
+            hostAliases:
+              - ip: "54.83.113.224"
+                hostnames:
+                  - "db8"
+              - ip: "54.226.42.156"
+                hostnames:
+                  - "db9"
+              - ip: "3.86.229.102"
+                hostnames:
+                  - "db10"
+              - ip: "54.157.140.121"
+                hostnames:
+                  - "db11"
+              - ip: "184.72.123.175"
+                hostnames:
+                  - "arbiter0"
+                  - "arbiter1"
+              - ip: "54.159.75.108"
+                hostnames:
+                  - "analytics1"
+            {{- end }}
+
+        # Configuration Map Settings
+        # note: these config maps will be applied to all pod-running resources
+        #       in this release, even if you define multiple config maps
+        configMaps:
+          default:
+            enabled: true
+            annotations:
+              # These next 3 annotations affect how/when helm updates config maps during
+              # deployment
+              "helm.sh/hook-weight": "1"
+              "helm.sh/hook": "pre-install,pre-upgrade"
+              "helm.sh/hook-delete-policy": "before-hook-creation"
+            env:
+              # Here's where our config goes that we want to originate from the helmfile
+              # runtime.  The only thing we require here is "FLAVOR".  Since helmfile is
+              # run from Codefresh CI/CD, the `env` variables found throughout need to
+              # exist during the deployment step in Codefresh.
+              #
+              # FLAVOR sets the place where apps will pull from SSM via  chamber for
+              # environment configuration (see the entrypoint script)
+              FLAVOR: '{{ env "FLAVOR" | default "" }}'
+              RELEASE_VERSION: '{{ env "RELEASE_VERSION" | default "0.0.0" }}'
+
+              # Configuration for Datadog
+              DD_ENV: '{{ env "FLAVOR" | default "" }}'
+              DD_SERVICE: '<REPO_NAME>'
+              DD_VERSION: '{{ env "IMAGE_TAG" | default "latest" }}'
+              DD_LOGS_INJECTION: 'true'
+              DD_TRACE_ANALYTICS_ENABLED: 'true'
+              DD_PROFILING_ENABLED: 'false'
+
+        # Service endpoint
+        # Kubernetes Services expose a pod or replicaSet outside of their namespace.
+        service:
+          enabled: true
+          # This will give it an IP the cluster can hit
+          type: ClusterIP
+          ports:
+            # you can define multiple port mappings, as needed
+            default:
+              # This is the port your docker image is listening on
+              internal: 80
+              # This is the port you want available on the ClusterIP
+              external: 80
+
+        # Ingress Configuration
+        ingress:
+          default:
+            enabled: true
+            annotations:
+              kubernetes.io/ingress.class: {{ env "OIDC_INGRESS_NGINX_CLASS" | default "oidc-ingress" }}
+              kubernetes.io/tls-acme: "true"
+
+              forecastle.stakater.com/appName: "{{ env "RELEASE_NAME" | default "<REPO_NAME>-dev-00" }}"
+              forecastle.stakater.com/expose: "true"
+              forecastle.stakater.com/group: {{ env "PORTAL_GROUP" | default "Unlimited" }}
+              forecastle.stakater.com/instance: {{ env "OIDC_INGRESS_NGINX_CLASS" | default "oidc-ingress" }}
+
+              external-dns.alpha.kubernetes.io/target: "{{ env "NGINX_INGRESS_HOSTNAME" }}"
+              external-dns.alpha.kubernetes.io/ttl: "60"
+
+            hosts:
+              ### Required: APP_HOST;
+              {{- if eq .Environment.Name "prod" }}
+              '{{ env "APP_HOST" | default "<REPO_NAME>-prod.prod.spoton.sh" }}': /
+              {{- else }}
+              '{{ env "APP_HOST" | default "dev-00-<REPO_NAME>.qa.spoton.sh" }}': /
+              {{- end }}
+
+            tls:
+              - # secretName: '{{ env "APP_TLS_SECRET_NAME" | default "<REPO_NAME>-tls" }}'
+                hosts: ['{{ env "APP_HOST" }}']
+
+
+        # Kubernetes Jobs
+        # These are a great place to do things like db migrations and staticfile uploads
+        job:
+          migrations:
+            enabled: true
+            # max runtime for the job - it is forcibly terminated if this time limit is exceeded
+            # by any pod launched by this job
+            activeDeadlineSeconds: 300
+            # Try again?  Valid: OnFailure, Never, Always
+            restartPolicy: "Never"
+            annotations:
+              # These will ensure helm runs these before updating the replica set
+              # and that they needed to complete.  It also cleans up on success.
+              "helm.sh/hook-weight": "5"
+              "helm.sh/hook": "pre-install,pre-upgrade"
+              "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded"
+            pod:
+              # args to pass to the pod's image's entrypoint
+              args: ["python /code/wait_for_postgres.py && alembic upgrade head"]
+              annotations:
+                # IAM role to run the pod as
+                "iam.amazonaws.com/role":  "<REPO_NAME>-role"
+
+
+        # Health probes used by various kubernetes services and ingresses
+        # if these aren't set, kubernetes can't determine the health of your pod
+        # to automatically heal and replace malfunctioning ones
+        probes:
+          # Probe that ensures service is healthy
+          livenessProbe:
+            httpGet:
+              path: /health-check/
+              port: default
+              scheme: HTTP
+            periodSeconds: 30
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+
+          # Probe that ensures service is ready to accept requests
+          readinessProbe:
+            httpGet:
+              path: /health-check/
+              port: default
+              scheme: HTTP
+            periodSeconds: 10
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 2
+
+        # Resource limits
+        # These are important - this is how we handle scaling, overcommitment of resources,
+        # and being a good neighbor.  Each *pod* gets these limits.  If you run a replicaSet
+        # with 10 pods, multipy these by 10 to determine what your app might consume.
+        #
+        # Here's an example dashboard for our staging resource committments for the cluster:
+        # https://grafana.us-east-1.staging.spoton.sh/d/efa86fd1d0c121a26444b636a3f509a8/kubernetes-compute-resources-cluster?orgId=1&refresh=10s&from=1568984026447&to=1568987626447&var-datasource=Prometheus&var-cluster=
+        # And by namespace (this one is the staging namespace):
+        # https://grafana.us-east-1.staging.spoton.sh/d/85a562078cdf77779eaa1add43ccec1e/kubernetes-compute-resources-namespace-pods?orgId=1&refresh=10s&var-datasource=Prometheus&var-cluster=&var-namespace=staging&from=1568984078471&to=1568987678471
+        #
+        # Reference: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/
+        #
+        # Memory: Fixed point integer with units of E, P, T, G, M, K or 2^n equivalents Ei, Pi, Ti, Gi, Mi, Ki
+        # CPU: 1 = 1 AWS vCPU; fractions or metric units, eg 20mi = 0.02 of a CPU
+        resources:
+          # Requests are what you want your pod to be guaranteed
+          # a pod cannot be launched if no kubernetes node can schedule these resources to the pod
+          requests:
+            memory: 150Mi
+            cpu: 20m
+          # limits are what your pod cannot use more than.  pods exceeding limits can and will be
+          # terminated by the kubelet running them
+          limits:
+            memory: 750Mi
+            cpu: 1

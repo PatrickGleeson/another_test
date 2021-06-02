@@ -1,0 +1,9 @@
+# Git
+.git/
+
+# Python
+venv/
+__pycache__/
+
+# VSCode
+.vscode/

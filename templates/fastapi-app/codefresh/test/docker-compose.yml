@@ -1,0 +1,17 @@
+version: "3"
+
+services:
+  # PostgreSQL
+  database:
+    image: postgres:12
+    env_file:
+      - codefresh/test/test.env
+
+  # <REPO_NAME> Service
+  <REPO_NAME>:
+    restart: always
+    image: ${{build_image}}
+    env_file:
+      - codefresh/test/test.env
+    depends_on:
+      - database

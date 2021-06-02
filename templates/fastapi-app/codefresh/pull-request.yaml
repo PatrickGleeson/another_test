@@ -1,0 +1,295 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Build
+  - Test
+  - Deploy
+
+steps:
+  validate:
+    title: "Validate"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      - |-
+        ${{GITHUB_REPO_STATUS_TOKEN}} Personal Access Token used to give scripts
+        permission to update the "status check" status on GitHub pull requests
+      - ${{SLACK_WEBHOOK_URL}} Secret URL used by scripts to send updates to a Slack channel
+      - |-
+        ${{AWS_DOCKER_REPO_HOST}} The host hame portion of the ECR Docker repo to use.
+        Typically something like 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - |-
+        ${{CF_PULL_REQUEST_NUMBER}} The PR number from GitHub.
+        The PR number is only set if this build was triggered in relation to a PR.
+        Requiring this to be present means requiring this pipeline to only work with PRs.
+      - ${{AWS_ENV_NAME}} The full name of the AWS environment to deploy to, e.g. prod.spoton.sh
+      - ${{BASE_HOST}} The subdomain below which to start attaching new host names
+      - ${{KOPS_CLUSTER_NAME}} The name of the kops cluster to operate on, as known to kops
+      - ${{KUBE_CONTEXT}} The name of the Codefresh Kubernetes integration to use for authentication
+      - |-
+        ${{GIT_PROVIDER}} The name of the Codefresh Git integration to use
+        when cloning Git repositories.
+      - |-
+        ${{KUBERNETES_DOCKER_REGISTRY}} The name of the Codefresh Kubernetes Docker integration to use
+        when pushing images for use on Kubernetes.
+      - |-
+        ${{TOOL_DOCKER_REPO_PREFIX}} The first part of the full name from which
+        to pull the Docker image of the AWS tools image for a given AWS environment.
+        For example "r.cfcr.io/spoton", to combine with AWS_ENV_NAME to give the full
+        name of the tool image to use, such as "r.cfcr.io/spoton/staging.spoton.sh".
+      - |-
+        ${{BUILD_HARNESS_VERSION}} The version of the cloudposse/build-harness image to use
+        to send notifications to Slack.
+
+  export:
+    title: Export Environment
+    stage: Prepare
+    image: alpine
+    commands:
+      - >-
+        { [[ -z $DOCKER_DEV_SUFFIX ]] || [[ $DOCKER_DEV_SUFFIX = "-dev" ]]; }  ||
+        (echo "* Unexpected value for DOCKER_DEV_SUFFIX: \"$DOCKER_DEV_SUFFIX\".
+        Should be empty or \"--dev\""; exit 36)
+      # Ensure an empty DOCKER_DEV_SUFFIX is available to the steps
+      # if it is not otherwise set
+      - export DOCKER_DEV_SUFFIX
+      - export APP_SCHEME=${APP_SCHEME:-https}
+      - export RELEASE_NAMESPACE="pr-${CF_PULL_REQUEST_NUMBER}-${CF_REPO_NAME}"
+      - export RELEASE_NAME=$RELEASE_NAMESPACE
+      - export PORTAL_GROUP=Unlimited
+      # If the branch name contains a slash (/), then everything before the first slash
+      # is used as the namespace, to allow deploying multiple projects to the same ns.
+      - >-
+        [[ "${CF_BRANCH}" = "${CF_BRANCH%%/*}" ]]
+        || { RELEASE_NAMESPACE="${CF_BRANCH%%/*}"; PORTAL_GROUP=$RELEASE_NAMESPACE
+        RELEASE_NAME="${RELEASE_NAMESPACE}-${CF_REPO_NAME}"; }
+      - cf_export DOCKER_DEV_SUFFIX APP_SCHEME RELEASE_NAMESPACE RELEASE_NAME PORTAL_GROUP
+      - cf_export GIT_BRANCH=${{CF_BRANCH}}
+      - cf_export PROJECT=${{CF_REPO_NAME}}
+      - cf_export APP_NAME=${{CF_REPO_NAME}}
+      - cf_export APP_IAM_ROLE=${{CF_REPO_NAME}}-role
+      - cf_export FLAVOR=unlimited
+      - cf_export CHART_NAME=${{CF_REPO_NAME}}
+      - cf_export PIPELINE_ENV=unlimited-staging
+      - cf_export KOPS_CLUSTER_NAME=${{KOPS_CLUSTER_NAME}}
+      - cf_export APP_HOST_DOMAIN="${RELEASE_NAME}.${{BASE_HOST}}"
+      - cf_export IMAGE_NAME=${{AWS_DOCKER_REPO_HOST}}/${{CF_REPO_NAME}}${DOCKER_DEV_SUFFIX}
+      - cf_export IMAGE_TAG=${{CF_SHORT_REVISION}}
+
+  main_clone:
+    title: "Clone repository"
+    type: git-clone
+    stage: Prepare
+    description: "Initialize"
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+    git: ${{GIT_PROVIDER}}
+    revision: ${{CF_REVISION}}
+
+  build:
+    type: parallel
+    stage: Build
+    steps:
+      build_image:
+        title: Build image
+        type: build
+        description: Build app
+        image_name: ${{CF_REPO_NAME}}
+        tag: ${{CF_SHORT_REVISION}}
+        dockerfile: Dockerfile
+        no_cache: false
+        no_cf_cache: false
+        build_arguments:
+          - BUILD_COMMIT_SHA=${{CF_SHORT_REVISION}}
+          - REQUIREMENTS=requirements/requirements.txt
+      # It is not uncommon that you want to include extra artifacts (tools, debugging symbols)
+      # in your test environment compared to your production environment. If you want to do
+      # that, you can use Docker build args to alter your build and create a separate
+      # test image by uncommenting the build_test step below and changing the composition
+      # candidate under "test" from ${{build_image}} to ${{build_test}}
+      #
+      #
+      # see https://docs.docker.com/engine/reference/commandline/#set-build-time-variables---build-arg
+
+      build_test:
+        title: "Build test image"
+        type: build
+        description: "Build test image"
+        image_name: ${{CF_REPO_NAME}}-test-runner
+        tag: ${{CF_SHORT_REVISION}}-test
+        dockerfile: Dockerfile
+        no_cache: false
+        no_cf_cache: false
+        build_arguments:
+          - BUILD_COMMIT_SHA=${{CF_SHORT_REVISION}}
+          - REQUIREMENTS=requirements/requirements-test.txt
+        when:
+          condition:
+            all:
+              testsEnabled: "match('${{CF_PULL_REQUEST_LABELS}}', 'no tests', false) == false"
+
+  test:
+    title: "Run tests"
+    stage: Test
+    type: composition
+    fail_fast: true
+    # Run the docker-composition in the root of the repo
+    composition: docker-compose.yml
+    # Run tests against the composition
+    composition_candidates:
+      unit_tests:
+        # If you have built a different image for testing, use
+        # ${{build_test}} instead of ${{build_image}} in your docker-compose file
+        # image: ${{build_test}}
+        image: ${{build_test}}
+        entrypoint: ["./codefresh/test/unit_test.sh"]
+        environment:
+          - FLAVOR=integration-test
+        env_file:
+          - codefresh/test/test.env
+      health_check:
+        image: "${{TOOL_DOCKER_REPO_PREFIX}}/${{AWS_ENV_NAME}}:latest"
+        entrypoint: ["codefresh/test/test.sh"]
+        env_file:
+          - codefresh/test/test.env
+        volumes:
+          - "${{CF_VOLUME_NAME}}:${{CF_VOLUME_PATH}}"
+        working_dir: "${{CF_VOLUME_PATH}}/${{CF_REPO_NAME}}"
+    when:
+      condition:
+        all:
+          testsEnabled: "match('${{CF_PULL_REQUEST_LABELS}}', 'no tests', false) == false"
+
+  set_github_deployment_status_to_pending:
+    title: Set GitHub deployment status to "pending"
+    stage: Deploy
+    image: cloudposse/github-status-updater
+    environment:
+      - GITHUB_ACTION=update_state
+      - GITHUB_TOKEN=${{GITHUB_REPO_STATUS_TOKEN}}
+      - GITHUB_OWNER=${{CF_REPO_OWNER}}
+      - GITHUB_REPO=${{CF_REPO_NAME}}
+      - GITHUB_REF=${{CF_REVISION}}
+      - GITHUB_CONTEXT=Staging Environment
+      - GITHUB_STATE=pending
+      - GITHUB_DESCRIPTION=Deploying changes to ${{RELEASE_NAMESPACE}} namespace
+      - GITHUB_TARGET_URL=${{APP_SCHEME}}://${{APP_HOST_DOMAIN}}/health-check/
+    when:
+      condition:
+        all:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+          githubNotificationsEnabled: "'${{GITHUB_NOTIFICATIONS_ENABLED}}' == 'true'"
+
+  push_image_commit:
+    title: Push image with commit tag
+    stage: Deploy
+    type: push
+    registry: ${{KUBERNETES_DOCKER_REGISTRY}}
+    candidate: ${{build_image}}
+    image_name: ${{CF_REPO_NAME}}${{DOCKER_DEV_SUFFIX}}
+    tags:
+      - "pr-${{CF_PULL_REQUEST_NUMBER}}"
+      - "${{IMAGE_TAG}}"
+      - "${{CF_REVISION}}"
+      - "${{CF_SHORT_REVISION}}"
+
+  wait:
+    title: Wait
+    stage: Deploy
+    image: codefresh/cli:latest
+    commands:
+      - >-
+        codefresh get builds --pipeline=destroy --pipeline=pull-request --branch=${{CF_BRANCH}}
+        --status running --limit 1000 -o json
+        | jq --arg id ${{CF_BUILD_ID}} -ser 'flatten|.[-1].id==$id'
+    retry:
+      maxAttempts: 10
+      delay: 20
+      exponentialFactor: 1.1
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+
+  deploy_helmfile:
+    title: Deploy with helmfile
+    stage: Deploy
+    image: "${{TOOL_DOCKER_REPO_PREFIX}}/${{AWS_ENV_NAME}}:latest"
+    working_directory: /conf/
+    environment:
+      - "KUBECONFIG=${{CF_KUBECONFIG_PATH}}"
+      - "REPO_ROOT=${{CF_VOLUME_PATH}}/${{CF_REPO_NAME}}"
+      - "APP_HOST=${{APP_HOST_DOMAIN}}"
+    shell: bash
+    commands:
+      # Announce the release version
+      - echo "* Preparing to deploy ${RELEASE_NAME} with image ${IMAGE_NAME}:${IMAGE_TAG}"
+      - echo "*     with flavor \"$FLAVOR\" into namespace ${RELEASE_NAMESPACE}"
+      - kubectl config use-context "${KUBE_CONTEXT}"
+      # Annotate the namespace to allow the app's IAM role and *only* the app's IAM role to be assumed
+      - annotate-namespace "${RELEASE_NAMESPACE}" "iam.amazonaws.com/permitted=${APP_IAM_ROLE}"
+      - cd $(conf-directory helmfiles) && echo Working directory is now $PWD
+      - direnv exec . helmfile --namespace="${RELEASE_NAMESPACE}" --environment="${FLAVOR}"
+        -f "${REPO_ROOT}/deploy/helmfile.yaml" apply
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+
+  set_github_deployment_status_to_success:
+    title: Set GitHub deployment status to "success"
+    stage: Deploy
+    image: cloudposse/github-status-updater
+    environment:
+      - GITHUB_ACTION=update_state
+      - GITHUB_TOKEN=${{GITHUB_REPO_STATUS_TOKEN}}
+      - GITHUB_OWNER=${{CF_REPO_OWNER}}
+      - GITHUB_REPO=${{CF_REPO_NAME}}
+      - GITHUB_REF=${{CF_REVISION}}
+      - GITHUB_CONTEXT=Staging Environment
+      - GITHUB_STATE=success
+      - GITHUB_DESCRIPTION=Deployed to ${{RELEASE_NAMESPACE}} namespace
+      - GITHUB_TARGET_URL=${{APP_SCHEME}}://${{APP_HOST_DOMAIN}}/health-check/
+    when:
+      condition:
+        all:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+          githubNotificationsEnabled: "'${{GITHUB_NOTIFICATIONS_ENABLED}}' == 'true'"
+
+  send_slack_notification:
+    title: Send notification to Slack channel
+    stage: Deploy
+    image: cloudposse/build-harness:${{BUILD_HARNESS_VERSION}}
+    working_directory: /build-harness
+    environment:
+      - GIT_COMMIT_SHORT=${{CF_SHORT_REVISION}}
+      - GIT_COMMIT_URL=${{CF_COMMIT_URL}}
+      - GIT_COMMIT_MESSAGE=${{CF_COMMIT_MESSAGE}}
+      - GIT_COMMIT_AUTHOR=${{CF_COMMIT_AUTHOR}}
+      - GIT_BRANCH_TAG=${{CF_BRANCH}}
+      - APP_HOST=${{APP_SCHEME}}://${{APP_HOST_DOMAIN}}/health-check/
+    commands:
+      - make codefresh/notify/slack/deploy/webapp GIT_COMMIT_TIMESTAMP=$((${{CF_BUILD_TIMESTAMP}}/1000))
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+
+  add_url_to_comment_on_pr:
+    title: Comment on PR with the deployed URL
+    stage: Deploy
+    image: cloudposse/github-commenter
+    environment:
+      - GITHUB_TOKEN=${{GITHUB_REPO_STATUS_TOKEN}}
+      - GITHUB_OWNER=${{CF_REPO_OWNER}}
+      - GITHUB_REPO=${{CF_REPO_NAME}}
+      - GITHUB_COMMENT_TYPE=pr
+      - GITHUB_PR_ISSUE_NUMBER=${{CF_PULL_REQUEST_NUMBER}}
+      - "GITHUB_COMMENT=Version ${{CF_SHORT_REVISION}} should be up. The health page is at ${{APP_SCHEME}}://${{APP_HOST_DOMAIN}}/health-check/"
+    when:
+      condition:
+        all:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == true"
+          githubNotificationsEnabled: "'${{GITHUB_NOTIFICATIONS_ENABLED}}' == 'true'"

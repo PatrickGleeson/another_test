@@ -1,0 +1,52 @@
+repositories:
+  # Cloud Posse incubator repo of helm charts
+  - name: "cloudposse-incubator"
+    url: "https://charts.cloudposse.com/incubator/"
+
+environments:
+  # The "default" environment is available and used when `helmfile` is run without `--environment NAME`.
+  default:
+  unlimited:
+
+releases:
+  - name: 'postgres-{{ env "RELEASE_NAME" }}'
+    chart: "cloudposse-incubator/monochart"
+    version: "0.23.1"
+    wait: true
+    atomic: true
+    cleanupOnFail: true
+    values:
+      - fullnameOverride: '{{ .Environment.Values | getOrNil "fullname" | default "postgres" }}'
+        image:
+          repository: "postgres"
+          tag: "11.4"
+          pullPolicy: Always
+
+        deployment:
+          enabled: true
+
+        service:
+          enabled: true
+          type: ClusterIP
+          ports:
+            default:
+              internal: 5432
+              external: 5432
+
+        # Configuration Settings
+        # This allows us to customize how the DB image comes up
+        configMaps:
+          default:
+            enabled: true
+            env:
+              POSTGRES_USER: '{{ env "POSTGRES_USER" | default "postgres" }}'
+              POSTGRES_DB: '{{ env "POSTGRES_DB" | default "database" }}'
+              POSTGRES_PASSWORD: '{{ env "POSTGRES_PASS" | default "postgres" }}'
+
+        resources:
+          requests:
+            memory: 100Mi
+            cpu: 10m
+          limits:
+            memory: 500Mi
+            cpu: 500m

@@ -1,0 +1,36 @@
+version: "1.0"
+kind: pipeline
+metadata:
+  name: <REPO_NAME>/build
+  project: <REPO_NAME>
+spec:
+  triggers:
+    - name: SpotOnInc/<REPO_NAME>
+      description: Commit to master
+      type: git
+      repo: SpotOnInc/<REPO_NAME>
+      events:
+        - push.heads
+      pullRequestAllowForkEvents: false
+      commentRegex: /.*/gi
+      branchRegex: /^main/gi
+      branchRegexInput: regex
+      provider: github
+      disabled: false
+      options:
+        noCache: false
+        noCfCache: false
+        resetVolume: false
+      context: github
+      contexts: []
+      variables: []
+  steps: {}
+  variables: []
+  contexts:
+    - Spoton global config
+    - Spoton global secrets
+  specTemplate:
+    location: git
+    repo: SpotOnInc/<REPO_NAME>
+    path: ./codefresh/build.yaml
+    context: github

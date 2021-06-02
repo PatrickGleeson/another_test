@@ -1,0 +1,72 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Build
+  - Push
+
+steps:
+  validate:
+    title: "Validate: parameters present"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      #  ${{DOCKER_DEV_SUFFIX}} is optional. If present, it will be added to the end
+      #  of the image name for non-production images, ensuring that production and
+      #  non-production Docker images are stored in different repos.
+      - |-
+        ${{GIT_PROVIDER}} The name of the Codefresh Git integration to use
+        when cloning Git repositories.
+      - |-
+        ${{KUBERNETES_DOCKER_REGISTRY}} The name of the Codefresh Kubernetes Docker integration to use
+        when pushing images for use on Kubernetes.
+      - ${{CF_REPO_OWNER}}
+      - ${{CF_REPO_NAME}}
+      - ${{CF_REVISION}}
+      - ${{CF_SHORT_REVISION}}
+
+  export:
+    title: Export Environment
+    stage: Prepare
+    image: alpine
+    commands:
+      - >-
+        { [[ -z $DOCKER_DEV_SUFFIX ]] || [[ $DOCKER_DEV_SUFFIX = "-dev" ]]; }  ||
+        (echo "* Unexpected value for DOCKER_DEV_SUFFIX: \"$DOCKER_DEV_SUFFIX\".
+        Should be empty or \"--dev\""; exit 36)
+      # Ensure an empty DOCKER_DEV_SUFFIX is available to the steps
+      # if it is not otherwise set
+      - export DOCKER_DEV_SUFFIX
+      - cf_export DOCKER_DEV_SUFFIX
+
+  main_clone:
+    title: "Clone repository"
+    type: git-clone
+    stage: Prepare
+    description: "Initialize"
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+    git: ${{GIT_PROVIDER}}
+    revision: ${{CF_REVISION}}
+
+  build_image:
+    title: Build image
+    stage: Build
+    type: build
+    description: Build image
+    dockerfile: Dockerfile
+    image_name: ${{CF_REPO_NAME}}${{DOCKER_DEV_SUFFIX}}
+    build_arguments:
+      - BUILD_COMMIT_SHA=${{CF_SHORT_REVISION}}
+
+  push_image_commit:
+    title: Push image with commit tag
+    stage: Push
+    type: push
+    candidate: ${{build_image}}
+    registry: ${{KUBERNETES_DOCKER_REGISTRY}}
+    image_name: ${{CF_REPO_NAME}}${{DOCKER_DEV_SUFFIX}}
+    tags:
+      - "${{CF_REVISION}}"
+      - "${{CF_SHORT_REVISION}}"

@@ -1,0 +1,35 @@
+version: "1.0"
+kind: pipeline
+metadata:
+  name: <REPO_NAME>/release
+  project: <REPO_NAME>
+spec:
+  triggers:
+    - name: SpotOnInc/<REPO_NAME>
+      description: Release
+      type: git
+      repo: SpotOnInc/<REPO_NAME>
+      events:
+        - release
+      pullRequestAllowForkEvents: false
+      commentRegex: /.*/gi
+      branchRegex: /.*/gi
+      branchRegexInput: regex
+      provider: github
+      disabled: false
+      options:
+        noCache: false
+        noCfCache: false
+        resetVolume: false
+      context: github
+      contexts: []
+      variables: []
+  steps: {}
+  variables: []
+  contexts:
+    - Spoton global config
+  specTemplate:
+    location: git
+    repo: SpotOnInc/<REPO_NAME>
+    path: ./codefresh/release.yaml
+    context: github

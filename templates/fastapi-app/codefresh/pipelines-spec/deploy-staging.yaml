@@ -1,0 +1,39 @@
+version: "1.0"
+kind: pipeline
+metadata:
+  name: <REPO_NAME>/deploy-staging
+  project: <REPO_NAME>
+  labels:
+    tags: ["deploy"]
+spec:
+  triggers:
+    - name: release-deploy
+      description: manual trigger for release pipeline to execute
+      type: git
+      repo: SpotOnInc/<REPO_NAME>
+      events:
+        - push.heads
+      pullRequestAllowForkEvents: false
+      commentRegex: /.*/gi
+      branchRegex: /.*/gi
+      branchRegexInput: regex
+      provider: github
+      disabled: true
+      options:
+        noCache: false
+        noCfCache: false
+        resetVolume: false
+      context: github
+      contexts: []
+      variables: []
+  steps: {}
+  variables: []
+  contexts:
+    - Spoton global config
+    - Spoton global secrets
+    - us-east-1.staging.spoton.sh
+  specTemplate:
+    location: git
+    repo: SpotOnInc/<REPO_NAME>
+    path: ./codefresh/deploy.yaml
+    context: github

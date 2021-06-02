@@ -1,0 +1,40 @@
+version: "1.0"
+kind: pipeline
+metadata:
+  name: <REPO_NAME>/destroy
+  project: <REPO_NAME>
+  labels:
+    tags: []
+spec:
+  triggers:
+    - name: destroy
+      description: Destroy an "unlimited staging" environment
+      type: git
+      repo: SpotOnInc/<REPO_NAME>
+      events:
+        - pullrequest.closed
+        - pullrequest.unlabeled
+      pullRequestAllowForkEvents: false
+      commentRegex: /.*/gi
+      branchRegex: /.*/gi
+      branchRegexInput: regex
+      provider: github
+      disabled: false
+      options:
+        noCache: false
+        noCfCache: false
+        resetVolume: false
+      context: github
+      contexts: []
+      variables: []
+  steps: {}
+  variables: []
+  contexts:
+    - Spoton global config
+    - Spoton global secrets
+    - us-east-1.staging.spoton.sh
+  specTemplate:
+    location: git
+    repo: SpotOnInc/<REPO_NAME>
+    path: ./codefresh/destroy.yaml
+    context: github

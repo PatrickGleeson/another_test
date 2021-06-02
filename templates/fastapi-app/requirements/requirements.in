@@ -1,0 +1,12 @@
+# API requirements
+fastapi
+uvicorn[standard]
+aiohttp
+ddtrace
+# Databases
+databases[postgresql]
+sqlalchemy-utils
+psycopg2
+# Models
+pydantic[email]
+alembic

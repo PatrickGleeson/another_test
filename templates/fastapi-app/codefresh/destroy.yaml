@@ -1,0 +1,67 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Destroy
+
+steps:
+  validate:
+    title: "Validate"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      - |-
+        ${{CF_PULL_REQUEST_NUMBER}} The PR number from GitHub.
+        The PR number is only set if this build was triggered in relation to a PR.
+        Requiring this to be present means requiring this pipeline to only work with PRs.
+      - ${{KOPS_CLUSTER_NAME}} The name of the kops cluster to operate on, as known to kops
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == false"
+          validatePRAction: "'${{CF_PULL_REQUEST_ACTION}}' == 'closed'"
+
+  # Codefresh expects a step called main_clone, so we provide it, even though in this pipeline
+  # we do not actually clone the git repository.
+  main_clone:
+    title: Wait
+    stage: Destroy
+    image: codefresh/cli:latest
+    commands:
+      - >-
+        codefresh get builds --pipeline=destroy --pipeline=pull-request
+        --branch=${{CF_BRANCH}} --status running --limit 1000 -o json
+        | jq --arg id ${{CF_BUILD_ID}} -ser 'flatten|.[-1].id==$id'
+    retry:
+      maxAttempts: 10
+      delay: 20
+      exponentialFactor: 1.1
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == false"
+          validatePRAction: "'${{CF_PULL_REQUEST_ACTION}}' == 'closed'"
+
+  destroy:
+    title: Destroy namespace
+    stage: Destroy
+    image: "${{TOOL_DOCKER_REPO_PREFIX}}/${{AWS_ENV_NAME}}:latest"
+    working_directory: /conf/helmfiles/
+    environment:
+      - KUBECONFIG=${{CF_KUBECONFIG_PATH}}
+      - KOPS_CLUSTER_NAME=${{KOPS_CLUSTER_NAME}}
+      - DESTROY_NAMESPACE=pr-${{CF_PULL_REQUEST_NUMBER}}-${{CF_REPO_NAME}}
+      - RELEASE_NAME=pr-${{CF_PULL_REQUEST_NUMBER}}-${{CF_REPO_NAME}}
+    shell: bash
+    commands:
+      # Announce the release version
+      - echo "Destroying ${RELEASE_NAME}"
+      - kubectl config use-context "${KUBE_CONTEXT}"
+      - destroy-namespace "${DESTROY_NAMESPACE}"
+    when:
+      condition:
+        any:
+          deployLabel: "match('${{CF_PULL_REQUEST_LABELS}}', 'deploy', false) == false"
+          validatePRAction: "'${{CF_PULL_REQUEST_ACTION}}' == 'closed'"

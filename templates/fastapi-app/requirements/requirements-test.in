@@ -1,0 +1,7 @@
+-c requirements.in
+
+black
+pytest
+pytest-asyncio
+pytest-mock
+httpx # to run tests against the API

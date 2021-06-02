@@ -1,0 +1,5 @@
+[flake8]
+ignore = F812,H101,H202,H233,H301,H306,H401,H403,H404,H405,H501
+exclude = .git, __pycache__, old, build, dist
+max-complexity = 18
+select = B,C,E,F,W,T4,B9

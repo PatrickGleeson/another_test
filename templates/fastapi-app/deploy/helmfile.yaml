@@ -1,0 +1,12 @@
+# per-environment config.  If `--environment` is used on the `helmfile` command line, and the environment
+# is not listed here, it will not be released
+environments:
+  default:
+  staging:
+  prod:
+  unlimited:
+
+# List of helmfiles to include.  Will go through these sequentially at deploy time.
+helmfiles:
+  - "releases/postgres.yaml"
+  - "releases/<REPO_NAME>.yaml"

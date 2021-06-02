@@ -1,0 +1,157 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Deploy
+
+steps:
+  validate:
+    title: "Validate"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      - ${{FLAVOR}} The short name of the environment to release into, such as "prod" or "demo"
+      - ${{IMAGE_NAME}} The full name of the image to deploy, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/webapp
+      - ${{IMAGE_TAG}} The tag of the image to deploy
+      - ${{AWS_ENV_NAME}} The full name of the AWS environment to deploy to, e.g. prod.spoton.sh
+      - ${{BASE_HOST}} The subdomain below which to start attaching new host names
+      - ${{KOPS_CLUSTER_NAME}} The name of the kops cluster to deploy into, as known to kops
+      - ${{KUBE_CONTEXT}} The name of the Codefresh Kubernetes integration to use for authentication
+      - |-
+        ${{GIT_PROVIDER}} The name of the Codefresh Git integration to use
+        when cloning Git repositories.
+      - |-
+        ${{AWS_DOCKER_REPO_HOST}} The host hame portion of the ECR Docker repo to use.
+        Typically something like 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - |-
+        ${{TOOL_DOCKER_REPO_PREFIX}} The first part of the full name from which
+        to pull the Docker image of the AWS tools image for a given AWS environment.
+        For example "r.cfcr.io/spoton", to combine with AWS_ENV_NAME to give the full
+        name of the tool image to use, such as "r.cfcr.io/spoton/staging.spoton.sh".
+      - |-
+        ${{BUILD_HARNESS_VERSION}} The version of the cloudposse/build-harness image to use
+        to send notifications to Slack.
+      - ${{SLACK_WEBHOOK_URL}} Secret URL used by scripts to send updates to a Slack channel
+      - ${{CF_REPO_OWNER}}
+      - ${{CF_REPO_NAME}}
+      - ${{CF_REVISION}}
+      - ${{CF_SHORT_REVISION}}
+      - ${{CF_COMMIT_URL}}
+      - ${{CF_COMMIT_MESSAGE}}
+      - ${{CF_COMMIT_AUTHOR}}
+      - ${{CF_BRANCH}}
+
+  create_context:
+    title: "Create Context"
+    stage: Prepare
+    image: alpine
+    commands:
+      - cf_export FLAVOR=${{FLAVOR}}
+      - cf_export APP_IAM_ROLE=${{CF_REPO_NAME}}-role
+      - cf_export CHART_NAME=${{CF_REPO_NAME}}
+      - cf_export RELEASE_NAME=${{CF_REPO_NAME}}-${{FLAVOR}}
+      - cf_export RELEASE_NAMESPACE=${{FLAVOR}}
+      - cf_export APP_HOST_DOMAIN=${{CF_REPO_NAME}}-${{FLAVOR}}.${{BASE_HOST}}
+      - cf_export KOPS_CLUSTER_NAME=${{KOPS_CLUSTER_NAME}}
+      - cf_export PORTAL_GROUP=Featured
+      - export APP_NAME=${{CF_REPO_NAME}}
+      - export APP_SCHEME=${APP_SCHEME:-https}
+      - export RC_VAR_NAME="$(echo "${APP_NAME}" | tr '[:lower:]-' '[:upper:]_')_REPLICA_COUNT"
+      - export ${RC_VAR_NAME}=${REPLICA_COUNT:-3}
+      - echo branch $CF_BRANCH
+      - echo release tag $CF_RELEASE_TAG
+      - echo revision $CF_REVISION
+      - default_msg="Deploy $APP_NAME ${CF_RELEASE_TAG:-$CF_SHORT_REVISION} to ${FLAVOR}"
+      - export GIT_COMMIT_MESSAGE="${CF_COMMIT_MESSAGE:-$default_msg}"
+      - export GIT_COMMIT_AUTHOR="${CF_COMMIT_AUTHOR:-(unknown)}"
+      - cf_export GIT_COMMIT_MESSAGE GIT_COMMIT_AUTHOR APP_NAME ${RC_VAR_NAME} APP_SCHEME
+
+  ask_for_permission:
+    type: pending-approval
+    # title: Deploy release of ${{APP_NAME}}:${{IMAGE_TAG}} to ${{FLAVOR}}?
+    title: Deploy release of <REPO_NAME>
+    stage: Prepare
+
+  # For some reason, Codefresh re-runs the clone step after asking for
+  # permission, so we just wait until after it to do it the first time.
+  main_clone:
+    title: "Clone repository"
+    type: git-clone
+    stage: Prepare
+    description: "Initialize"
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+    git: ${{GIT_PROVIDER}}
+    revision: ${{CF_REVISION}}
+    when:
+      steps:
+        - name: ask_for_permission
+          on:
+            - approved
+
+  wait:
+    title: Wait
+    stage: Prepare
+    image: codefresh/cli:latest
+    commands:
+      - >-
+        codefresh get builds --pipeline=deploy-${{FLAVOR}} --status running
+        --limit 1000 -o json
+        | jq --arg id ${{CF_BUILD_ID}} -ser 'flatten|.[-1].id==$id'
+    retry:
+      maxAttempts: 10
+      delay: 20
+      exponentialFactor: 1.1
+    when:
+      steps:
+        - name: ask_for_permission
+          on:
+            - approved
+
+  deploy_helmfile:
+    title: Deploy with helmfile
+    stage: Deploy
+    image: "${{TOOL_DOCKER_REPO_PREFIX}}/${{AWS_ENV_NAME}}:latest"
+    working_directory: /conf/
+    environment:
+      - "KUBECONFIG=${{CF_KUBECONFIG_PATH}}"
+      - "REPO_ROOT=${{CF_VOLUME_PATH}}/${{CF_REPO_NAME}}"
+      - "APP_HOST=${{APP_HOST_DOMAIN}}"
+    shell: bash
+    commands:
+      # Announce the release version
+      - echo "* Preparing to deploy ${RELEASE_NAME} with image ${IMAGE_NAME}:${IMAGE_TAG}"
+      - echo "*     with flavor \"$FLAVOR\" into namespace ${RELEASE_NAMESPACE}"
+      - kubectl config use-context "${KUBE_CONTEXT}"
+      - cd $(conf-directory helmfiles) && echo Working directory is now $PWD
+      - direnv exec . helmfile --namespace="${RELEASE_NAMESPACE}" --environment="${FLAVOR}"
+        -f "${REPO_ROOT}/deploy/helmfile.yaml" apply
+    when:
+      steps:
+        - name: ask_for_permission
+          on:
+            - approved
+
+  send_slack_notification:
+    title: Send notification to Slack channel
+    stage: Deploy
+    image: cloudposse/build-harness:${{BUILD_HARNESS_VERSION}}
+    working_directory: /build-harness
+    # Quotes in the YAML get quoted, so
+    # don't use VAR="${{value}}" because the VAR will include the quotes
+    environment:
+      - PIPELINE_ENV=${{FLAVOR}}
+      - GIT_COMMIT_SHORT=${{CF_SHORT_REVISION}}
+      - GIT_COMMIT_URL=${{CF_COMMIT_URL}}
+      # - GIT_COMMIT_MESSAGE=${{CF_COMMIT_MESSAGE}}
+      # - GIT_COMMIT_AUTHOR=${{CF_COMMIT_AUTHOR}}
+      - GIT_BRANCH_TAG=${{CF_BRANCH}}
+      - APP_HOST=${{APP_SCHEME}}://${{APP_HOST_DOMAIN}}/healthz/
+    commands:
+      - make codefresh/notify/slack/deploy/webapp GIT_COMMIT_TIMESTAMP=$((${{CF_BUILD_TIMESTAMP}}/1000))
+    when:
+      steps:
+        - name: ask_for_permission
+          on:
+            - approved

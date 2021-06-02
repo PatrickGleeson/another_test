@@ -1,0 +1,107 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Promote
+  - Deploy
+
+steps:
+  validate:
+    title: "Validate: parameters present"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      #  ${{DOCKER_DEV_SUFFIX}} is optional. If present, it will be added to the end
+      #  of the image name for non-production images, ensuring that production and
+      #  non-production Docker images are stored in different repos.
+      - |-
+        ${{AWS_DOCKER_REPO_HOST}} The host hame portion of the ECR Docker repo to use.
+        Typically something like 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - |-
+        ${{KUBERNETES_DOCKER_REGISTRY}} The name of the Codefresh Kubernetes Docker integration to use
+        when pushing images for use on Kubernetes.
+      - ${{CF_RELEASE_TAG}} The release tag from GitHub. This pipeline should only be run on releases.
+      - ${{CF_REPO_OWNER}}
+      - ${{CF_REPO_NAME}}
+      - ${{CF_REVISION}}
+      - ${{CF_SHORT_REVISION}}
+      - ${{CF_COMMIT_URL}}
+      - ${{CF_COMMIT_MESSAGE}}
+      - ${{CF_COMMIT_AUTHOR}}
+      - ${{CF_BRANCH}}
+
+  main_clone:
+    title: "Create Context"
+    stage: "Prepare"
+    image: alpine
+    commands:
+      # Extract the postfix of a semver (e.g. 0.0.0-flavor+metadata => flavor)
+      - suffix=$(echo " " "${CF_RELEASE_TAG}" |sed -E 's/^[^-+]+-?([^+]*)(\+.*)?$/\1/')
+      - 'export FLAVOR="${suffix:-prod}"'
+      - 'case "$FLAVOR" in staging|qa|demo|prod) ;; *) echo "* Unknown flavor: \"$FLAVOR\""; exit 35;; esac'
+      - >-
+        { [[ -z $DOCKER_DEV_SUFFIX ]] || [[ $DOCKER_DEV_SUFFIX = "-dev" ]]; }  ||
+        (echo "* Unexpected value for DOCKER_DEV_SUFFIX: \"$DOCKER_DEV_SUFFIX\".
+        Should be empty or \"--dev\""; exit 36)
+      # Figure out if we are pulling from or pushing to an alternate Docker repo
+      - 'export DOCKER_PULL_SUFFIX="${DOCKER_DEV_SUFFIX}"'
+      - 'export DOCKER_PUSH_SUFFIX="${DOCKER_DEV_SUFFIX}"'
+      - '[[ "$FLAVOR" == "prod" || "${CF_BRANCH}" == "master" ]] && DOCKER_PUSH_SUFFIX=""'
+      - export NORMALIZED_RELEASE_TAG="${CF_RELEASE_TAG%%\+*}"
+      - cf_export FLAVOR DOCKER_PULL_SUFFIX DOCKER_PUSH_SUFFIX NORMALIZED_RELEASE_TAG
+      - cf_export SOURCE_IMAGE="${AWS_DOCKER_REPO_HOST}/${CF_REPO_NAME}${DOCKER_PULL_SUFFIX}:${CF_REVISION}"
+      - cf_export PUSH_IMAGE_NAME="${CF_REPO_NAME}${DOCKER_PUSH_SUFFIX}"
+      - cf_export IMAGE_NAME="${AWS_DOCKER_REPO_HOST}/${CF_REPO_NAME}${DOCKER_PUSH_SUFFIX}"
+      - cf_export IMAGE_TAG="${CF_REVISION}"
+      - cf_export RELEASE_VERSION=$( echo ${CF_RELEASE_TAG} | cut -d '-' -f 1)
+      - echo branch $CF_BRANCH
+      - echo release tag $CF_RELEASE_TAG
+      - echo CF_COMMIT_MESSAGE is \"${CF_COMMIT_MESSAGE}\"
+
+  pull_image_sha:
+    title: Pull image with commit sha
+    stage: "Promote"
+    image: "${{SOURCE_IMAGE}}"
+    registry: ${{KUBERNETES_DOCKER_REGISTRY}}
+    retry:
+      maxAttempts: 10
+      delay: 20
+      exponentialFactor: 1.1
+    commands:
+      - "true"
+
+  push_image_tag:
+    title: Push image with release tag
+    stage: "Promote"
+    type: push
+    image_name: ${{PUSH_IMAGE_NAME}}
+    candidate: "${{SOURCE_IMAGE}}"
+    registry: ${{KUBERNETES_DOCKER_REGISTRY}}
+    tags:
+      - "${{NORMALIZED_RELEASE_TAG}}"
+      - "${{CF_REVISION}}"
+      - "${{CF_SHORT_REVISION}}"
+
+  deploy:
+    title: Deploy Release
+    stage: "Deploy"
+    image: "codefresh/cli:latest"
+    commands:
+      - >-
+        codefresh run "${{CF_REPO_NAME}}/deploy-${{FLAVOR}}"
+        --trigger=release-deploy --branch="${{CF_BRANCH}}"
+        --sha="${{CF_REVISION}}" --enable-notifications --detach
+        -v IMAGE_NAME="${{IMAGE_NAME}}" -v IMAGE_TAG="${{IMAGE_TAG}}"
+        -v FLAVOR="${{FLAVOR}}"
+        -v CF_REPO_OWNER="${{CF_REPO_OWNER}}"
+        -v CF_REPO_NAME="${{CF_REPO_NAME}}"
+        -v CF_RELEASE_TAG="${{CF_RELEASE_TAG}}"
+        -v RELEASE_VERSION="${{RELEASE_VERSION}}"
+        -v CF_REVISION="${{CF_REVISION}}"
+        -v CF_BRANCH="${{CF_BRANCH}}"
+        -v CF_SHORT_REVISION="${{CF_SHORT_REVISION}}"
+        -v CF_COMMIT_URL="${{CF_COMMIT_URL}}"
+        -v CF_COMMIT_MESSAGE="${{CF_COMMIT_MESSAGE}}"
+        -v CF_COMMIT_AUTHOR="${{CF_COMMIT_AUTHOR}}"
