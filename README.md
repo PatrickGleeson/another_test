@@ -1,4 +1,4 @@
-# Main instructions for this template.
+# Main instructions for this template. Thing
 1. Press the `use this template` button.
 ![image](https://user-images.githubusercontent.com/61423717/111556651-aaf13500-8750-11eb-9a7d-1b695020c514.png)
 2. Select a name for your new repo.
